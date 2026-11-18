@@ -31,14 +31,51 @@ class VisualGuide:
 # YouTube: search links always resolve; plus curated popular tutorials where known.
 GUIDES: list[VisualGuide] = [
     # --- Fiskal modul / MCR3500 (eng muhim, printerdan oldin) ---
+    # Dastur qotishi — fiskaldan OLDIN tekshiriladi
+    VisualGuide(
+        id="app_freeze",
+        priority=90,
+        keywords=(
+            "не отвечает", "javob bermay", "not responding", "закрыть программу",
+            "dasturni yop", "programmani yop", "qotib", "завис", "зависл",
+            "приложение не отвечает", "kutish", "закрыть программу",
+            "не отвечает", "responding",
+        ),
+        title_uz="Dastur qotib qoldi — yopib ochish",
+        title_ru="Программа зависла — закрыть и открыть",
+        youtube_uz="https://www.youtube.com/results?search_query=Windows+dastur+javob+bermayapti+yopish",
+        youtube_ru="https://www.youtube.com/results?search_query=программа+не+отвечает+закрыть+Windows",
+        steps=[
+            GuideStep(
+                "freeze_01.png",
+                "1-qadam: Oynadagi «Dasturni yopish» / «Закрыть программу» tugmasini bosing",
+                "Шаг 1: Нажмите «Закрыть программу»",
+            ),
+            GuideStep(
+                "freeze_02.png",
+                "2-qadam: Keraksiz boshqa oynalarni yoping (ko'p ochiq bo'lsa sekinlashadi)",
+                "Шаг 2: Закройте лишние окна",
+            ),
+            GuideStep(
+                "freeze_03.png",
+                "3-qadam: F-Kassa / FOM ni qayta oching",
+                "Шаг 3: Снова откройте F-Kassa / FOM",
+            ),
+            GuideStep(
+                "freeze_04.png",
+                "4-qadam: Yana qotsa — vazifalar oynasida (Ctrl+Shift+Esc) to'xtating, keyin oching",
+                "Шаг 4: Если снова зависнет — завершите в диспетчере задач",
+            ),
+        ],
+    ),
     VisualGuide(
         id="fiscal_modul_mcr",
         priority=100,
+        # FAQAT aniq fiskallashtirish matnlari — "f-kassa"/"modul" YUQ (noto'g'ri tashxis berardi)
         keywords=(
-            "фискализ", "fiskallas", "fiskaliz", "фискальн", "fiskal", "fiscal",
-            "модул", "modul", "mcr3500", "mcr 3500", "card reader", "smart card",
-            "f-kassa", "fkassa", "eklz", "фн ", "fn ", "fleshka", "флешк",
-            "usb qurilma", "qora usb",
+            "фискализ", "fiskallas", "fiskaliz", "фискального модуля",
+            "chekni fiskallas", "fiskal modul ulanish", "mcr3500",
+            "ошибка фискализ", "ошибка фискализации",
         ),
         title_uz="Fiskal modul (MCR3500) — ulanish",
         title_ru="Фискальный модуль (MCR3500) — подключение",
@@ -92,33 +129,62 @@ GUIDES: list[VisualGuide] = [
         ),
         title_uz="Chek chiqmayapti — qadamlar",
         title_ru="Чек не печатается — шаги",
-        youtube_uz="https://www.youtube.com/results?search_query=Windows+printer+ishlamayapti+chek+chiqmayapti",
-        youtube_ru="https://www.youtube.com/results?search_query=принтер+не+печатает+чек+Windows+очередь+печати",
+        youtube_uz="https://www.youtube.com/results?search_query=USB+printer+simini+qayta+ulash+chek+chiqmayapti",
+        youtube_ru="https://www.youtube.com/results?search_query=чек+принтер+кабель+переподключить+Xprinter",
         steps=[
             GuideStep(
                 "printer_01.png",
-                "1-qadam: Printer yonikmi va chiroq yoniqmi?",
+                "1-qadam: Printer yonikmi? Chiroq yonadimi?",
                 "Шаг 1: Принтер включён? Индикатор горит?",
             ),
             GuideStep(
                 "printer_02.png",
-                "2-qadam: Qog'oz solinganmi? Tiqilib qolmaganmi?",
-                "Шаг 2: Есть бумага? Нет замятия?",
+                "2-qadam: Printer ORQASIDAGI simni chiqarib qayta tiqing",
+                "Шаг 2: Вытащите и вставьте кабель СЗАДИ принтера",
             ),
             GuideStep(
                 "printer_03.png",
-                "3-qadam: Windowsda printer 'ulanmagan' emasligini tekshiring",
-                "Шаг 3: В Windows принтер не должен быть «Отключён»",
+                "3-qadam: Kompyuter (protsessor) tomondagi USB/simni ham qayta tiqing",
+                "Шаг 3: Также переподключите USB со стороны компьютера",
             ),
             GuideStep(
                 "printer_04.png",
-                "4-qadam: Chop etish navbatini tozalang",
-                "Шаг 4: Очистите очередь печати",
+                "4-qadam: Qog'oz borligini tekshiring, chekni qayta chiqaring",
+                "Шаг 4: Проверьте бумагу и повторите печать чека",
             ),
             GuideStep(
                 "printer_05.png",
-                "5-qadam: Kassadan sinov chek chiqaring",
-                "Шаг 5: Распечатайте тестовый чек из кассы",
+                "5-qadam: Yechilmasa — rasm yuboring yoki AnyDesk ID yozing",
+                "Шаг 5: Если не помогло — фото или AnyDesk ID",
+            ),
+        ],
+    ),
+    VisualGuide(
+        id="humo_terminal",
+        priority=40,
+        keywords=(
+            "humo", "ҳумо", "terminal", "терминал", "s/n", "seriya", "серия",
+            "to'lov", "оплат", "karta terminal",
+        ),
+        title_uz="HUMO / to'lov terminali",
+        title_ru="HUMO / платёжный терминал",
+        youtube_uz="https://www.youtube.com/results?search_query=HUMO+terminal+ishlamayapti+qayta+yoqish",
+        youtube_ru="https://www.youtube.com/results?search_query=терминал+HUMO+не+работает+перезагрузка",
+        steps=[
+            GuideStep(
+                "term_01.png",
+                "1-qadam: Terminal yonikmi? Ekran yonadimi?",
+                "Шаг 1: Терминал включён? Экран горит?",
+            ),
+            GuideStep(
+                "term_02.png",
+                "2-qadam: Kabelni chiqarib qayta tiqing",
+                "Шаг 2: Отключите и снова подключите кабель",
+            ),
+            GuideStep(
+                "term_03.png",
+                "3-qadam: Kerak bo'lsa S/N — terminal ORQASIDA/pasida yozilgan, rasmini yuboring",
+                "Шаг 3: S/N на обороте/снизу терминала — пришлите фото",
             ),
         ],
     ),
@@ -362,29 +428,120 @@ class MatchedGuide:
     title: str
 
 
+def classify_problem(blob: str) -> str | None:
+    """Return problem class: freeze | fiscal | printer | smena | ... or None.
+
+    Muhim: Z-hisobot / smena HECH QACHON avtomatik fiskal USB bo'lmasin.
+    Fiskal faqat aniq «фискализации / fiskallashtirish» matni bo'lsa.
+    """
+    t = (blob or "").lower()
+    if not t.strip():
+        return None
+
+    # --- Z-hisobot / smena AVVAL (lotin + kirill) ---
+    smena_marks = (
+        "smena", "смена", "z-hisobot", "z hisobot", "zhisobot",
+        "z otchet", "z-otchet", "zotchet", "z отчет", "z-отчет", "зотчет",
+        "z report", "z-report", "kunlik hisobot", "yopilmay",
+        "otchet olib", "отчет олив", "отчет олиб", "hisobot olib",
+    )
+    if any(x in t for x in smena_marks):
+        return "smena"
+
+    freeze_marks = (
+        "не отвечает", "javob bermay", "not responding", "закрыть программу",
+        "dasturni yop", "programmani yop", "приложение не отвечает",
+        "dastur qotib", "программа зависл", "kutish yoki", "a_qotish",
+        "tur_a", "tur: a", "wait for the program", "program is not responding",
+        "osilib qol", "qotib qol", "зависла", "зависло",
+    )
+    # FAQAT aniq fiskallashtirish — "mcr3500" yolg'iz matnda yetarli emas
+    fiscal_marks = (
+        "фискализ", "fiskallas", "fiskaliz", "фискального модуля",
+        "chekni fiskallas", "ошибка фискализ", "ошибка фискализации",
+        "fiskal modul ulanish", "подключение фискального",
+        "b_fiskal", "tur_b", "tur: b",
+    )
+    # Qurilma nomi — faqat USB/fleshka konteksti bilan
+    fiscal_device = ("mcr3500", "mcr 3500")
+    fiscal_device_ctx = ("usb", "fleshka", "флеш", "modul", "модул", "ulan", "подключ")
+
+    has_freeze = any(x in t for x in freeze_marks)
+    has_fiscal = any(x in t for x in fiscal_marks) or (
+        any(x in t for x in fiscal_device) and any(x in t for x in fiscal_device_ctx)
+    )
+
+    if has_freeze and not has_fiscal:
+        return "freeze"
+    if has_fiscal and not has_freeze:
+        return "fiscal"
+    if has_fiscal and has_freeze:
+        # Ikkalasi bo'lsa: aniq фискализ matni ustun
+        return "fiscal"
+    if any(
+        x in t
+        for x in (
+            "chek chiq", "printer", "принтер", "xprinter", "qog'oz", "қағоз",
+            "chop etmay", "печат", "navbat",
+        )
+    ):
+        return "printer"
+    if any(x in t for x in ("humo", "terminal", "терминал", "to'lov terminal", "karta terminal")):
+        return "terminal"
+    if any(x in t for x in ("wifi", "wi-fi", "internet", "интернет", "router", "tarmoq yo'q", "нет сети")):
+        return "network"
+    if any(x in t for x in ("login", "parol", "парол", "caps", "kirish", "неверн", "noto'g'ri parol")):
+        return "login"
+    if any(x in t for x in ("skaner", "сканер", "barcode", "shtrix", "штрих")):
+        return "scanner"
+    if any(x in t for x in ("kamera", "камера", "nvr", "kuzatuv", "видео")):
+        return "camera"
+    if any(x in t for x in ("anydesk", "masofadan", "remote")):
+        return "remote"
+    if any(x in t for x in ("ochilmay", "не открыв", "ishga tushmay", "already running")):
+        return "fom_open"
+    if any(x in t for x in ("d_noaniq", "tur_d", "aniqlanmadi", "o'qib bo'lmadi", "noaniq")):
+        return "unclear"
+    return None
+
+
 def match_guide(
     user_text: str,
     lang: str = "uz",
     extra_context: str = "",
 ) -> MatchedGuide | None:
-    """Match guide by keywords; higher priority wins ties (fiscal > printer)."""
+    """Match guide by classified problem — hech qachon F-Kassa deb fiskalga o'tkazmang."""
     t = f"{user_text or ''} {extra_context or ''}".lower()
     if not t.strip():
         return None
 
-    # Aniq fiskal xato matni — majburiy fiscal guide
-    fiscal_force = (
-        "фискализ", "fiskallas", "fiskaliz", "фискального модуля", "fiskal modul",
-        "mcr3500", "ошибка фискализ", "chekni fiskallas",
-    )
-    if any(x in t for x in fiscal_force):
-        forced = next((g for g in GUIDES if g.id == "fiscal_modul_mcr"), None)
+    kind = classify_problem(t)
+    id_map = {
+        "freeze": "app_freeze",
+        "fiscal": "fiscal_modul_mcr",
+        "printer": "printer_chek",
+        "terminal": "humo_terminal",
+        "network": "internet",
+        "login": "login_parol",
+        "scanner": "skaner",
+        "smena": "smena",
+        "fom_open": "fom_ochilmaydi",
+        "remote": None,  # matn yetarli
+        "camera": None,
+        "unclear": None,
+    }
+    guide_id = id_map.get(kind) if kind else None
+    if guide_id:
+        forced = next((g for g in GUIDES if g.id == guide_id), None)
         if forced:
             return _pack_guide(forced, lang)
 
+    # Fiskal guide'ni umumiy "f-kassa" / "modul" bilan tanlamang
     best: VisualGuide | None = None
     best_score = 0
     for g in GUIDES:
+        if g.id == "fiscal_modul_mcr":
+            continue  # faqat classify orqali
         hits = sum(1 for kw in g.keywords if kw.lower() in t)
         if hits <= 0:
             continue

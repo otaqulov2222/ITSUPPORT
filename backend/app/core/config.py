@@ -27,9 +27,9 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 14
     jwt_algorithm: str = "HS256"
 
-    bootstrap_admin_email: str = "admin@pharmacy.uz"
-    bootstrap_admin_password: str = "ChangeMeNow!123"
-    bootstrap_admin_name: str = "Super Admin"
+    bootstrap_admin_email: str = "adminitsupport"
+    bootstrap_admin_password: str = "040507vaksinamed"
+    bootstrap_admin_name: str = "IT Support Admin"
 
     rate_limit_auth_per_minute: int = 20
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"

@@ -8,11 +8,22 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.prompts import VISION_PROMPT, build_system_prompt, detect_reply_language
+from app.ai.diagnosis import Diagnosis, diagnose_problem
+from app.ai.prompts import (
+    ANSWER_WITH_DIAGNOSIS,
+    VISION_PROMPT,
+    build_system_prompt,
+    detect_reply_language,
+)
 from app.ai.providers.factory import get_stt, get_text_generator, get_vision_analyzer
 from app.ai.providers.groq_provider import GroqError
 from app.ai.rag import format_kb_context, retrieve_articles
-from app.ai.visual_guides import append_youtube, match_guide, sanitize_plain_language
+from app.ai.visual_guides import (
+    append_youtube,
+    classify_problem,
+    match_guide,
+    sanitize_plain_language,
+)
 from app.db.models import Message
 from app.db.models.knowledge import AiUsageLog
 
@@ -54,7 +65,8 @@ def _is_meta_capability_question(user_text: str) -> bool:
         return False
     meta_markers = (
         "beraolas", "bera ol", "javob bera", "yordam bera", "bilasizmi", "bilasanmi",
-        "qilaolas", "qila ol", "умеешь", "можете", "можешь", "подскажешь",
+        "qilaolas", "qila ol", "nimalar qila", "nima qila", "nima yordam", "qanday yordam",
+        "умеешь", "можете", "можешь", "подскажешь", "что умеешь", "чем поможешь",
         "yordam bera olas", "savollarga javob", "по вопросам", "can you", "do you know",
     )
     problem_markers = (
@@ -75,16 +87,22 @@ def _is_meta_capability_question(user_text: str) -> bool:
 def _meta_short_reply(lang: str) -> str:
     if lang == "ru":
         return (
-            "Да, могу помочь по FOM и кассе.\n\n"
-            "Напишите конкретно, что случилось — например:\n"
-            "«FOM не открывается» или «чек не печатается».\n"
-            "Можно сразу прислать фото ошибки."
+            "Я — VAKSINAMED IT SUPPORT. Помогаю по IT проблемам аптеки:\n"
+            "• FOM / F-Kassa (не открывается, зависает, вход)\n"
+            "• Чек/принтер, Z-отчёт, смена\n"
+            "• Фискальный модуль (MCR3500) — только если такая ошибка на экране\n"
+            "• HUMO/терминал, сканер, Wi‑Fi/интернет, камера\n"
+            "• Можно прислать фото ошибки или AnyDesk ID\n\n"
+            "Напишите конкретно, что случилось — разберу и дам шаги."
         )
     return (
-        "Ha, FOM va kassa bo'yicha yordam bera olaman.\n\n"
-        "Aniq muammoingizni yozing — masalan:\n"
-        "«FOM ochilmayapti» yoki «chek chiqmayapti».\n"
-        "Xato bo'lsa ekran rasmini ham yuboring."
+        "Men — VAKSINAMED IT SUPPORT. Dorixona IT muammolarida yordam beraman:\n"
+        "• FOM / F-Kassa (ochilmaslik, qotish, kirish)\n"
+        "• Chek / printer, Z-hisobot, smena\n"
+        "• Fiskal modul (MCR3500) — faqat shu xato chiqqanda\n"
+        "• HUMO / terminal, skaner, Wi‑Fi / internet, kamera\n"
+        "• Xato rasmini yoki AnyDesk ID yuborishingiz mumkin\n\n"
+        "Aniq muammoingizni yozing — tahlil qilib, qadamma-qadam yechim beraman."
     )
 
 
@@ -102,16 +120,162 @@ def _should_ask_screenshot(user_text: str, has_image: bool) -> bool:
     return any(x in t for x in triggers)
 
 
+def _normalize_vision_note(note: str) -> str:
+    """Prevent vision model from turning every F-Kassa screen into fiscal-USB advice."""
+    if not note:
+        return note
+    low = note.lower()
+    freeze_hit = any(
+        x in low
+        for x in (
+            "не отвечает",
+            "not responding",
+            "закрыть программу",
+            "javob bermay",
+            "a_qotish",
+            "tur_a",
+            "tur: a",
+        )
+    )
+    fiscal_literal = any(
+        x in low
+        for x in (
+            "фискализ",
+            "fiskallas",
+            "фискального модуля",
+            "chekni fiskallas",
+            "b_fiskal",
+            "tur_b",
+        )
+    )
+    if freeze_hit and not fiscal_literal:
+        return (
+            "TUR: A_QOTISH\n"
+            "Ko'rinadigan matn: dastur «Не отвечает» / «Закрыть программу».\n"
+            "Tahlil: F-Kassa/dastur qotib qolgan. Bu fiskal USB/fleshka EMAS.\n"
+            "Qadamlar: dasturni yopish → keraksiz oynalarni yopish → qayta ochish.\n"
+            f"[Asl tahlil]\n{note}"
+        )
+    # F-Kassa ko'rinadi lekin fiskal matn yo'q — USB ga otishni taqiqlash
+    if ("f-kassa" in low or "fkassa" in low or "fom" in low) and not fiscal_literal:
+        if any(x in low for x in ("usb", "mcr3500", "fleshka", "флеш", "fiskal modul")):
+            return (
+                "TUR: D_NOANIQ yoki C_BOSHQA\n"
+                "Diqqat: skrinshotda aniq «фискализации» matni KO'RINMADI. "
+                "USB/fleshka tashxisini BERMANG. "
+                "Agar «Не отвечает» bo'lsa — dasturni yoping. "
+                "Aks holda foydalanuvchidan xato matnini aniq yozishni so'rang.\n"
+                f"[Asl tahlil]\n{note}"
+            )
+    return note
+
+
+def _freeze_reply(lang: str) -> str:
+    if lang == "ru":
+        return (
+            "Проблема: F-Kassa / программа зависла (окно «Не отвечает»).\n\n"
+            "Это НЕ проблема USB-флешки / фискального модуля.\n\n"
+            "1. Нажмите «Закрыть программу».\n"
+            "2. Закройте лишние окна на компьютере.\n"
+            "3. Снова откройте F-Kassa / FOM.\n"
+            "4. Если снова зависнет: Ctrl+Shift+Esc → завершите программу → откройте снова.\n\n"
+            "Если появится другое окно ошибки — пришлите фото текста ошибки "
+            "или напишите текст ошибки словами."
+        )
+    return (
+        "Muammo: F-Kassa / dastur qotib qolgan (oynada «Javob bermayapti» / «Не отвечает»).\n\n"
+        "Bu USB fleshka / fiskal modul muammosi EMAS.\n\n"
+        "1. «Dasturni yopish» / «Закрыть программу» tugmasini bosing.\n"
+        "2. Kompyuterdagi keraksiz ochiq oynalarni yoping.\n"
+        "3. F-Kassa / FOM ni qayta oching.\n"
+        "4. Yana qotsa: Ctrl+Shift+Esc → dasturni to'xtating → qayta oching.\n\n"
+        "Boshqa xato oynasi chiqsa — xato matnini aniq yozing yoki yaqinroq rasm yuboring."
+    )
+
+
+def _fiscal_reply(lang: str) -> str:
+    if lang == "ru":
+        return (
+            "Проблема: ошибка фискализации чека — фискальный модуль (USB MCR3500).\n\n"
+            "1. Найдите чёрное USB-устройство MCR3500.\n"
+            "2. Вытащите USB, подождите 5 секунд, вставьте плотно.\n"
+            "3. Попробуйте другой USB-порт.\n"
+            "4. Проверьте, что SIM вставлена до конца.\n"
+            "5. Закройте и откройте F-Kassa / FOM, повторите чек.\n\n"
+            "Настройки фискального модуля сами не меняйте."
+        )
+    return (
+        "Muammo: chekni fiskallashtirish xatosi — fiskal modul (USB MCR3500).\n\n"
+        "1. Qora USB qurilmani toping (yorliq: MCR3500).\n"
+        "2. USB ni chiqarib oling, 5 soniya kuting, qayta mahkam tiqing.\n"
+        "3. Boshqa USB uyaga urinib ko'ring.\n"
+        "4. SIM to'g'ri va oxirigacha tiqilganini tekshiring.\n"
+        "5. F-Kassa / FOM ni yopib oching, chekni qayta chiqaring.\n\n"
+        "Fiskal sozlamani o'zingiz o'zgartirmang."
+    )
+
+
+def _unclear_reply(lang: str) -> str:
+    if lang == "ru":
+        return (
+            "На фото текст ошибки плохо читается — не хочу давать неправильный совет.\n\n"
+            "Пожалуйста:\n"
+            "1) Сфотографируйте окно ошибки ближе, или\n"
+            "2) Напишите текст ошибки словами (как на экране).\n\n"
+            "После этого дам точные шаги."
+        )
+    return (
+        "Rasmdagi xato matni aniq o'qilmadi — noto'g'ri maslahat bermaslik uchun.\n\n"
+        "Iltimos:\n"
+        "1) Xato oynasini yaqinroq rasmga oling, yoki\n"
+        "2) Ekrandagi xato matnini aniq yozib yuboring.\n\n"
+        "Shundan keyin aniq qadamlarni beraman."
+    )
+
+
+def _smena_zreport_reply(lang: str) -> str:
+    if lang == "ru":
+        return (
+            "Проблема: в FOM не получается снять Z-отчёт / закрыть смену.\n\n"
+            "Это НЕ инструкция «вынуть флешку MCR3500» в первую очередь.\n\n"
+            "1. Проверьте: смена открыта? Есть ли незакрытые чеки/продажи.\n"
+            "2. Чековый принтер включён и готов?\n"
+            "3. Повторите Z-отчёт / закрытие смены.\n"
+            "4. Если ошибка на экране — пришлите фото текста ошибки "
+            "(или напишите текст словами).\n"
+            "5. Не делайте принудительное закрытие сами — это опасно для данных.\n\n"
+            "Если на экране именно «ошибка фискализации» — тогда напишите/пришлите "
+            "этот текст, дам шаги по USB-модулю."
+        )
+    return (
+        "Muammo: FOM da Z-hisobot / smena yopilmayapti.\n\n"
+        "Bu birinchi navbatda MCR3500 fleshka chiqarib-tiqish EMAS.\n\n"
+        "1. Smena ochiqmi? Yopilmagan chek / sotuv bormi — tekshiring.\n"
+        "2. Chek printeri yonik va tayyormi?\n"
+        "3. Z-hisobot / smena yopishni qayta urinib ko'ring.\n"
+        "4. Ekranda xato chiqsa — xato matnining rasmini yuboring "
+        "(yoki matnni aniq yozing).\n"
+        "5. Majburiy yopishni o'zingiz qilmang — ma'lumot xavfi bor.\n\n"
+        "Agar ekranda aynan «chekni fiskallashtirishda xatolik» bo'lsa — "
+        "shu matnni yozing, keyin USB modul bo'yicha qadam beraman."
+    )
+
+
 def _attach_guide(
     reply: AIReply,
     user_text: str,
     lang: str,
     extra_context: str = "",
 ) -> AIReply:
+    # Guide faqat foydalanuvchi + skrinshot tahliliga qarab (AI matniga emas — u adashishi mumkin)
     matched = match_guide(user_text, lang=lang, extra_context=extra_context)
     if not matched:
         reply.text = sanitize_plain_language(reply.text)
         return reply
+    # Fiskal rasmlarni qotish holatida hech qachon yubormang
+    kind = classify_problem(f"{user_text} {extra_context}")
+    if kind == "freeze" and matched.guide.id == "fiscal_modul_mcr":
+        matched = match_guide(user_text, lang=lang, extra_context="не отвечает закрыть программу")
     reply.guide_images = [
         GuideImage(path=p, caption=c) for p, c in zip(matched.image_paths, matched.captions)
     ]
@@ -120,9 +284,9 @@ def _attach_guide(
     reply.text = append_youtube(reply.text, matched.youtube_url, lang)
     if reply.guide_images:
         if lang == "ru":
-            note = "\n\n📷 Ниже — пошаговые картинки (в т.ч. фото устройства). Смотрите по порядку."
+            note = "\n\n📷 Ниже — пошаговые картинки. Смотрите по порядку."
         else:
-            note = "\n\n📷 Pastda ketma-ket rasmlar bor (qurilma fotosi bilan). Tartib bilan qarang."
+            note = "\n\n📷 Pastda ketma-ket rasmlar bor. Tartib bilan qarang."
         if "Pastda ketma-ket" not in reply.text and "пошаговые картинки" not in reply.text:
             reply.text = reply.text.rstrip() + note
     return reply
@@ -158,7 +322,8 @@ async def _log_usage(
     await db.flush()
 
 
-async def _history(db: AsyncSession, conversation_id: UUID, limit: int = 12) -> list[dict[str, str]]:
+async def _history(db: AsyncSession, conversation_id: UUID, limit: int = 6) -> list[dict[str, str]]:
+    """Qisqa tarix — uzun fiskal qo'llanmalar keyingi tashxisni buzmasin."""
     result = await db.execute(
         select(Message)
         .where(Message.conversation_id == conversation_id)
@@ -171,8 +336,64 @@ async def _history(db: AsyncSession, conversation_id: UUID, limit: int = 12) -> 
         if not m.content_text:
             continue
         role = "assistant" if m.sender_type in {"AI", "ADMIN", "SYSTEM"} else "user"
-        messages.append({"role": role, "content": m.content_text[:2000]})
+        content = m.content_text
+        if role == "assistant":
+            # Rasmli qo'llanma spam / YouTube bloklarini qisqartirish
+            content = content.split("🎬")[0].split("📷")[0][:500]
+        else:
+            content = content[:800]
+        messages.append({"role": role, "content": content})
     return messages
+
+
+def _reply_from_diagnosis(diag: Diagnosis, lang: str) -> AIReply | None:
+    """Yuqori ishonchli tashxis → tayyor sifatli javob (LLM adashmasin)."""
+    if diag.problem_type == "smena":
+        return AIReply(
+            text=_smena_zreport_reply(lang),
+            confidence="VERIFIED",
+            model=diag.source,
+            used_kb=True,
+            ask_screenshot=True,
+        )
+    if diag.problem_type == "freeze":
+        return AIReply(
+            text=_freeze_reply(lang),
+            confidence="VERIFIED",
+            model=diag.source,
+            used_kb=False,
+            ask_screenshot=False,
+        )
+    if diag.problem_type == "fiscal":
+        return AIReply(
+            text=_fiscal_reply(lang),
+            confidence="VERIFIED",
+            model=diag.source,
+            used_kb=True,
+            ask_screenshot=False,
+        )
+    if diag.problem_type == "unclear" or (
+        diag.need_clarification and diag.confidence == "low" and not diag.safe_first_steps_uz
+    ):
+        q = diag.clarification_question_uz or _unclear_reply(lang)
+        if diag.summary_uz and diag.clarification_question_uz:
+            if lang == "ru":
+                text = f"Пока не хватает данных.\n\n{diag.clarification_question_uz}"
+            else:
+                text = (
+                    f"Hozircha aniq tashxis uchun ma'lumot yetarli emas.\n\n"
+                    f"{diag.clarification_question_uz}"
+                )
+        else:
+            text = q if diag.clarification_question_uz else _unclear_reply(lang)
+        return AIReply(
+            text=text,
+            confidence="UNVERIFIED",
+            model=diag.source,
+            used_kb=False,
+            ask_screenshot=True,
+        )
+    return None
 
 
 async def generate_support_reply(
@@ -194,7 +415,8 @@ async def generate_support_reply(
             ask_screenshot=False,
         )
 
-    articles = await retrieve_articles(db, user_text, limit=2)
+    # KB ni joriy savol + keyinroq tashxis bo'yicha olamiz
+    articles = await retrieve_articles(db, user_text, limit=3)
     kb = format_kb_context(articles)
     history = await _history(db, conversation_id)
     ask_shot = _should_ask_screenshot(user_text, bool(image_bytes))
@@ -223,6 +445,7 @@ async def generate_support_reply(
                 if vres.unclear
                 else vres.description
             )
+            vision_note = _normalize_vision_note(vision_note)
         except Exception as exc:
             logger.exception("Vision failed")
             await _log_usage(
@@ -242,42 +465,69 @@ async def generate_support_reply(
                 "Foydalanuvchidan ekrandagi xato matnini aniq yozib yuborishni so'rang."
             )
 
+    # === BOSQICH 1: TASHXIS (qoida + LLM) ===
+    diag = await diagnose_problem(
+        user_text=user_text,
+        vision_note=vision_note,
+        has_image=bool(image_bytes),
+        kb_context=kb,
+    )
+    await _log_usage(
+        db,
+        provider="internal",
+        model=diag.source,
+        capability="diagnosis",
+        conversation_id=conversation_id,
+        input_tokens=0,
+        output_tokens=0,
+        latency_ms=0,
+    )
+
+    # === BOSQICH 2: JAVOB ===
+    ruled = _reply_from_diagnosis(diag, lang)
+    if ruled:
+        if diag.problem_type == "freeze":
+            return _attach_guide(
+                ruled, user_text, lang, extra_context=vision_note or "не отвечает"
+            )
+        if diag.problem_type == "fiscal":
+            return _attach_guide(ruled, user_text, lang, extra_context=vision_note)
+        # smena/unclear — fiskal rasmlarsiz
+        ruled.text = sanitize_plain_language(ruled.text)
+        return ruled
+
+    # Qisman aniq tashxis — LLM ga tashxisni majburan beramiz
     user_block = user_text.strip() or "(matn yo'q, faqat media)"
     if vision_note:
         user_block += f"\n\n[SKRINSHOT TAHLILI]\n{vision_note}"
 
     if lang == "ru":
-        lang_line = (
-            "ЯЗЫК: пользователь пишет по-русски. Весь ответ ТОЛЬКО на русском. "
-            "Без английских слов (Ready, Online, Likely, Restart и т.п.)."
-        )
+        lang_line = "ЯЗЫК: весь ответ только на русском, без английского жаргона."
     else:
-        lang_line = (
-            "TIL: foydalanuvchi o'zbekcha yozgan. Butun javob FAQAT o'zbek lotin. "
-            "Inglizcha so'z YO'Q (Ready, Online, Likely, Restart va hokazo)."
-        )
-    screenshot_line = (
-        "Qadamlardan keyin ekrandagi xato rasmini so'rang."
-        if ask_shot
-        else "Rasm allaqachon bor yoki hozircha shart emas."
+        lang_line = "TIL: butun javob o'zbek lotin, inglizcha jargon yo'q."
+
+    diag_block = (
+        f"TASHXIS (majburiy):\n"
+        f"- tur: {diag.problem_type}\n"
+        f"- qisqa: {diag.summary_uz}\n"
+        f"- dalil: {diag.evidence}\n"
+        f"- ishonch: {diag.confidence}\n"
+        f"- aniqlashtirish kerakmi: {diag.need_clarification}\n"
+        f"- savol: {diag.clarification_question_uz}\n"
+        f"- xavfsiz qadamlar: {diag.safe_first_steps_uz}\n"
+        f"- QILMANG: {diag.do_not}\n"
     )
 
-    messages = history[-8:]
+    # Faqat oxirgi 4 ta qisqa xabar — eski fiskal spam aralashmasin
+    messages = [m for m in history[-4:] if m["role"] == "user"][-2:]
     messages.append(
         {
             "role": "user",
             "content": (
-                f"{lang_line}\n{screenshot_line}\n\n"
-                "JAVOB QOIDALARI:\n"
-                "- Faqat HOZIRGI muammo. Ko'p senariy / katalog TAQIQLANGAN.\n"
-                "- Maksimum 5 ta qisqa qadam. Oddiy odam tushunadigan til.\n"
-                "- VERIFIED/LIKELY/Ready/Online/Task Manager kabi so'zlarni YOZMANG.\n"
-                "- Agar фискализации / fiskal modul bo'lsa: faqat MCR3500 USB chiqarib-tiqish; "
-                "qog'oz/chop etish navbati YOZMANG.\n"
-                "- Aniq muammo yo'q bo'lsa — 1 ta aniqlashtirish so'rang.\n\n"
+                f"{lang_line}\n{ANSWER_WITH_DIAGNOSIS}\n{diag_block}\n"
                 f"Xodim xabari:\n{user_block}\n\n"
-                f"Tegishli bilim bazasi (faqat shu muammoga mos bo'lsa):\n{kb}\n\n"
-                "Hozir oddiy tilda yechim bering."
+                f"KB (mos bo'lsa):\n{kb}\n\n"
+                "Endi TO'G'RI, qisqa yechim yozing."
             ),
         }
     )
@@ -287,8 +537,8 @@ async def generate_support_reply(
         result = await gen.generate(
             system=build_system_prompt(),
             messages=messages,
-            temperature=0.2,
-            max_tokens=700,
+            temperature=0.15,
+            max_tokens=650,
         )
         await _log_usage(
             db,
@@ -300,24 +550,30 @@ async def generate_support_reply(
             output_tokens=result.output_tokens,
             latency_ms=result.latency_ms,
         )
-        text = result.text.strip()
-        if not text:
-            text = (
-                "Muammo qabul qilindi, lekin AI bo'sh javob qaytardi. "
-                "Iltimos, qayta yozing yoki ekran rasmini yuboring."
-            )
+        text = result.text.strip() or (
+            "Muammo qabul qilindi. Iltimos, xato matnini aniqroq yozing yoki rasm yuboring."
+        )
         already_asked = any(
             x in text.lower()
-            for x in ("skrinshot", "скриншот", "screenshot", "ekran rasm", "пришлите скрин", "расмни")
+            for x in ("skrinshot", "скриншот", "ekran rasm", "расм", "yozib yubor")
         )
         reply = AIReply(
             text=text,
-            confidence=_detect_confidence(text) if articles else "LIKELY",
-            model=result.model,
+            confidence="VERIFIED" if diag.confidence == "high" else "LIKELY",
+            model=f"{result.model}+{diag.source}",
             used_kb=bool(articles),
-            ask_screenshot=ask_shot and not already_asked,
+            ask_screenshot=(ask_shot or diag.need_clarification) and not already_asked,
         )
-        return _attach_guide(reply, user_text, lang, extra_context=vision_note)
+        # Guide faqat tashxis turiga mos
+        guide_ctx = vision_note
+        if diag.problem_type == "freeze":
+            guide_ctx = (vision_note or "") + " не отвечает"
+        elif diag.problem_type == "fiscal":
+            guide_ctx = vision_note
+        elif diag.problem_type in {"smena", "unclear"}:
+            reply.text = sanitize_plain_language(reply.text)
+            return reply
+        return _attach_guide(reply, user_text, lang, extra_context=guide_ctx)
     except GroqError as exc:
         logger.error("Groq failed: %s", exc)
         await _log_usage(
@@ -332,30 +588,21 @@ async def generate_support_reply(
             status="error",
             error=str(exc)[:500],
         )
+        # Tashxis qadamlaridan fallback
+        if diag.safe_first_steps_uz:
+            steps = "\n".join(f"{i}. {s}" for i, s in enumerate(diag.safe_first_steps_uz, 1))
+            text = f"Muammo: {diag.summary_uz}\n\n{steps}"
+            if diag.clarification_question_uz:
+                text += f"\n\n{diag.clarification_question_uz}"
+            return AIReply(text=text, confidence="LIKELY", model="diag-fallback", used_kb=True)
         if articles:
             a = articles[0]
             steps = a.steps or []
             step_lines = "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
-            if lang == "ru":
-                text = (
-                    f"Проблема: {a.problem or a.title}\n"
-                    f"{a.solution}\n{step_lines}\n\n"
-                    "AI временно недоступен. Если не поможет — /operator"
-                )
-            else:
-                text = (
-                    f"Muammo: {a.problem or a.title}\n"
-                    f"{a.solution}\n{step_lines}\n\n"
-                    "AI vaqtincha ishlamadi. Yechilmasa /operator"
-                )
-            reply = AIReply(text=text, confidence="VERIFIED", model="kb-fallback", used_kb=True)
-            return _attach_guide(reply, user_text, lang, extra_context=vision_note)
+            text = f"Muammo: {a.problem or a.title}\n{a.solution}\n{step_lines}"
+            return AIReply(text=text, confidence="VERIFIED", model="kb-fallback", used_kb=True)
         return AIReply(
-            text=(
-                "Сейчас AI недоступен. Напишите /operator"
-                if lang == "ru"
-                else "Hozir AI ishlamayapti. /operator yozing"
-            ),
+            text="Hozir AI ishlamayapti. /operator yozing" if lang != "ru" else "AI недоступен. /operator",
             confidence="UNVERIFIED",
             model="fallback",
         )

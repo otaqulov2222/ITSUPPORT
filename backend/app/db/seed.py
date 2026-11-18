@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.security import hash_password
 from app.db.fom_kb_seed import FOM_KB_SEED
+from app.db.group_kb_seed import GROUP_KB_SEED
 from app.db.kb_seed_data import KB_SEED
 from app.db.locations_loader import seed_branches_from_locations
 from app.db.models import KnowledgeArticle, User, UserRole
@@ -78,11 +79,19 @@ async def seed_reference_data(db: AsyncSession) -> None:
         role = await ensure_role(db, code.value, name)
         await bind_role_permissions(db, role, ROLE_PERMISSIONS.get(code, []))
 
-    result = await db.execute(select(User).where(User.email == settings.bootstrap_admin_email))
+    login = settings.bootstrap_admin_email.strip().lower()
+    result = await db.execute(select(User).where(User.email == login))
     admin = result.scalar_one_or_none()
+    # Eski default adminni yangi loginga ko'chirish
+    if admin is None:
+        legacy = await db.execute(select(User).where(User.email == "admin@pharmacy.uz"))
+        admin = legacy.scalar_one_or_none()
+        if admin is not None:
+            admin.email = login
+
     if admin is None:
         admin = User(
-            email=settings.bootstrap_admin_email,
+            email=login,
             password_hash=hash_password(settings.bootstrap_admin_password),
             full_name=settings.bootstrap_admin_name,
             is_active=True,
@@ -99,6 +108,13 @@ async def seed_reference_data(db: AsyncSession) -> None:
                 scope_id=None,
             )
         )
+    else:
+        # Parol/loginni .env dagi bootstrap bilan sinxronlash
+        admin.email = login
+        admin.password_hash = hash_password(settings.bootstrap_admin_password)
+        admin.full_name = settings.bootstrap_admin_name
+        admin.is_active = True
+        await db.flush()
 
     await seed_knowledge_articles(db)
     await seed_branches_from_locations(db)
@@ -106,7 +122,7 @@ async def seed_reference_data(db: AsyncSession) -> None:
 
 
 async def seed_knowledge_articles(db: AsyncSession) -> None:
-    for item in [*KB_SEED, *FOM_KB_SEED]:
+    for item in [*KB_SEED, *FOM_KB_SEED, *GROUP_KB_SEED]:
         existing = await db.execute(
             select(KnowledgeArticle).where(KnowledgeArticle.title == item["title"])
         )
