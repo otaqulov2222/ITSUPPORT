@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from sqlalchemy import select
-from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram import InputFile, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import ContextTypes
 
 from app.db.models import ProcessedTelegramUpdate
@@ -14,14 +15,43 @@ from app.services.tickets import create_ticket_from_conversation
 logger = logging.getLogger(__name__)
 
 HELP_TEXT = (
-    "Pharmacy AI Support\n\n"
-    "Muammoingizni oddiy tilida yozing.\n"
+    "VAKSINAMED IT yordam\n\n"
+    "Muammoingizni oddiy tilida yozing yoki rasm yuboring.\n"
     "Buyruqlar:\n"
     "/start — ro'yxatdan o'tish\n"
     "/help — yordam\n"
     "/ticket — ticket ochish\n"
-    "/operator — ting admin bilan bog'lanish\n"
+    "/operator — admin bilan bog'lanish\n"
 )
+
+
+async def _send_ai_reply(message, ai) -> int:
+    """Send text + optional step images; return last telegram message id."""
+    reply_text = ai.text
+    if getattr(ai, "ask_screenshot", False):
+        reply_text += (
+            "\n\n📸 Iltimos, ekrandagi xato rasmini yuboring — aniqroq yordam beraman."
+        )
+    sent = await message.reply_text(reply_text[:4000])
+    last_id = sent.message_id
+
+    images = [gi for gi in (getattr(ai, "guide_images", None) or []) if Path(gi.path).is_file()]
+    if not images:
+        return last_id
+
+    # One-by-one: har bir qadam alohida caption bilan aniqroq
+    for gi in images[:8]:
+        try:
+            path = Path(gi.path)
+            with path.open("rb") as fh:
+                photo_msg = await message.reply_photo(
+                    photo=InputFile(fh, filename=path.name),
+                    caption=(gi.caption or "")[:1024],
+                )
+                last_id = photo_msg.message_id
+        except Exception:
+            logger.exception("Guide image send failed: %s", gi.path)
+    return last_id
 
 
 async def _mark_update(db, update_id: int) -> bool:
@@ -269,21 +299,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     conversation_id=conv.id,
                     user_text=text,
                 )
-                reply_text = ai.text
+                if getattr(ai, "guide_images", None):
+                    await update.message.chat.send_action("upload_photo")
+                last_id = await _send_ai_reply(update.message, ai)
+                store_text = ai.text
                 if ai.ask_screenshot:
-                    reply_text += (
-                        "\n\n📸 Iltimos, ekrandagi xatolik rasmini (skrinshot) yuboring — "
-                        "aniqroq tahlil qilaman.\n"
-                        "Пожалуйста, пришлите скриншот ошибки на экране."
+                    store_text += (
+                        "\n\n📸 Iltimos, ekrandagi xato rasmini yuboring — aniqroq yordam beraman."
                     )
-                sent = await update.message.reply_text(reply_text[:4000])
                 ai_msg = await conversation_service.add_message(
                     db2,
                     conversation=conv,
                     sender_type="AI",
-                    content_text=reply_text,
-                    content_type="TEXT",
-                    telegram_message_id=sent.message_id,
+                    content_text=store_text,
+                    content_type="IMAGE" if getattr(ai, "guide_images", None) else "TEXT",
+                    telegram_message_id=last_id,
                     idempotency_key=f"ai:{update.update_id}",
                     ai_confidence=ai.confidence,
                     ai_model=ai.model,
@@ -367,14 +397,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     image_bytes=data,
                     image_mime="image/jpeg",
                 )
-                sent = await update.message.reply_text(ai.text[:4000])
+                if getattr(ai, "guide_images", None):
+                    await update.message.chat.send_action("upload_photo")
+                last_id = await _send_ai_reply(update.message, ai)
                 ai_msg = await conversation_service.add_message(
                     db2,
                     conversation=conv,
                     sender_type="AI",
                     content_text=ai.text,
-                    content_type="TEXT",
-                    telegram_message_id=sent.message_id,
+                    content_type="IMAGE" if getattr(ai, "guide_images", None) else "TEXT",
+                    telegram_message_id=last_id,
                     idempotency_key=f"ai-img:{update.update_id}",
                     ai_confidence=ai.confidence,
                     ai_model=ai.model,
@@ -518,14 +550,16 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 ai = await generate_support_reply(
                     db2, conversation_id=conv.id, user_text=transcript
                 )
-                sent = await update.message.reply_text(ai.text[:4000])
+                if getattr(ai, "guide_images", None):
+                    await update.message.chat.send_action("upload_photo")
+                last_id = await _send_ai_reply(update.message, ai)
                 ai_msg = await conversation_service.add_message(
                     db2,
                     conversation=conv,
                     sender_type="AI",
                     content_text=ai.text,
-                    content_type="TEXT",
-                    telegram_message_id=sent.message_id,
+                    content_type="IMAGE" if getattr(ai, "guide_images", None) else "TEXT",
+                    telegram_message_id=last_id,
                     idempotency_key=f"ai-voice:{update.update_id}",
                     ai_confidence=ai.confidence,
                     ai_model=ai.model,

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -11,10 +12,17 @@ from app.ai.prompts import VISION_PROMPT, build_system_prompt, detect_reply_lang
 from app.ai.providers.factory import get_stt, get_text_generator, get_vision_analyzer
 from app.ai.providers.groq_provider import GroqError
 from app.ai.rag import format_kb_context, retrieve_articles
+from app.ai.visual_guides import append_youtube, match_guide, sanitize_plain_language
 from app.db.models import Message
 from app.db.models.knowledge import AiUsageLog
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GuideImage:
+    path: Path
+    caption: str
 
 
 @dataclass
@@ -24,6 +32,8 @@ class AIReply:
     model: str
     used_kb: bool = False
     ask_screenshot: bool = False
+    guide_images: list[GuideImage] = field(default_factory=list)
+    youtube_url: str | None = None
 
 
 def _detect_confidence(text: str) -> str:
@@ -55,10 +65,8 @@ def _is_meta_capability_question(user_text: str) -> bool:
     )
     has_meta = any(m in t for m in meta_markers)
     has_problem = any(m in t for m in problem_markers)
-    # "fom buyicha savollarga javob beraolasmi" → meta only
     if has_meta and not has_problem:
         return True
-    # Very short capability ping
     if has_meta and len(t) < 80:
         return True
     return False
@@ -70,13 +78,13 @@ def _meta_short_reply(lang: str) -> str:
             "Да, могу помочь по FOM и кассе.\n\n"
             "Напишите конкретно, что случилось — например:\n"
             "«FOM не открывается» или «чек не печатается».\n"
-            "Можно сразу прислать скриншот ошибки."
+            "Можно сразу прислать фото ошибки."
         )
     return (
         "Ha, FOM va kassa bo'yicha yordam bera olaman.\n\n"
         "Aniq muammoingizni yozing — masalan:\n"
         "«FOM ochilmayapti» yoki «chek chiqmayapti».\n"
-        "Xato bo'lsa skrinshot ham yuboring."
+        "Xato bo'lsa ekran rasmini ham yuboring."
     )
 
 
@@ -92,6 +100,32 @@ def _should_ask_screenshot(user_text: str, has_image: bool) -> bool:
         "qotib", "завис", "краш", "crash", "bsod", "синий",
     )
     return any(x in t for x in triggers)
+
+
+def _attach_guide(
+    reply: AIReply,
+    user_text: str,
+    lang: str,
+    extra_context: str = "",
+) -> AIReply:
+    matched = match_guide(user_text, lang=lang, extra_context=extra_context)
+    if not matched:
+        reply.text = sanitize_plain_language(reply.text)
+        return reply
+    reply.guide_images = [
+        GuideImage(path=p, caption=c) for p, c in zip(matched.image_paths, matched.captions)
+    ]
+    reply.youtube_url = matched.youtube_url
+    reply.text = sanitize_plain_language(reply.text)
+    reply.text = append_youtube(reply.text, matched.youtube_url, lang)
+    if reply.guide_images:
+        if lang == "ru":
+            note = "\n\n📷 Ниже — пошаговые картинки (в т.ч. фото устройства). Смотрите по порядку."
+        else:
+            note = "\n\n📷 Pastda ketma-ket rasmlar bor (qurilma fotosi bilan). Tartib bilan qarang."
+        if "Pastda ketma-ket" not in reply.text and "пошаговые картинки" not in reply.text:
+            reply.text = reply.text.rstrip() + note
+    return reply
 
 
 async def _log_usage(
@@ -151,7 +185,6 @@ async def generate_support_reply(
 ) -> AIReply:
     lang = detect_reply_language(user_text)
 
-    # Capability / "can you help with FOM?" → short answer, no encyclopedia
     if not image_bytes and _is_meta_capability_question(user_text):
         return AIReply(
             text=_meta_short_reply(lang),
@@ -215,20 +248,18 @@ async def generate_support_reply(
 
     if lang == "ru":
         lang_line = (
-            "CRITICAL LANGUAGE RULE: Пользователь пишет на русском. "
-            "Весь ваш ответ ОБЯЗАТЕЛЬНО на русском языке. "
-            "Не смешивайте с узбекским."
+            "ЯЗЫК: пользователь пишет по-русски. Весь ответ ТОЛЬКО на русском. "
+            "Без английских слов (Ready, Online, Likely, Restart и т.п.)."
         )
     else:
         lang_line = (
-            "CRITICAL LANGUAGE RULE: Foydalanuvchi o'zbekcha yozgan. "
-            "Butun javobni FAQAT o'zbek lotin yozuvida yozing. "
-            "Ruscha aralashtirmang."
+            "TIL: foydalanuvchi o'zbekcha yozgan. Butun javob FAQAT o'zbek lotin. "
+            "Inglizcha so'z YO'Q (Ready, Online, Likely, Restart va hokazo)."
         )
     screenshot_line = (
-        "After the steps, politely ask for a screenshot of the exact error window."
+        "Qadamlardan keyin ekrandagi xato rasmini so'rang."
         if ask_shot
-        else "Screenshot already provided or not required."
+        else "Rasm allaqachon bor yoki hozircha shart emas."
     )
 
     messages = history[-8:]
@@ -237,13 +268,16 @@ async def generate_support_reply(
             "role": "user",
             "content": (
                 f"{lang_line}\n{screenshot_line}\n\n"
-                "RULES FOR THIS REPLY:\n"
-                "- Answer ONLY the current problem. Do NOT list multiple unrelated scenarios.\n"
-                "- Max 5 short steps. No encyclopedia / catalog dump.\n"
-                "- If the user did not describe a concrete fault, ask one clarifying question.\n\n"
-                f"Employee message:\n{user_block}\n\n"
-                f"Relevant KB (use only if it matches THIS problem):\n{kb}\n\n"
-                "Give a focused IT fix now."
+                "JAVOB QOIDALARI:\n"
+                "- Faqat HOZIRGI muammo. Ko'p senariy / katalog TAQIQLANGAN.\n"
+                "- Maksimum 5 ta qisqa qadam. Oddiy odam tushunadigan til.\n"
+                "- VERIFIED/LIKELY/Ready/Online/Task Manager kabi so'zlarni YOZMANG.\n"
+                "- Agar фискализации / fiskal modul bo'lsa: faqat MCR3500 USB chiqarib-tiqish; "
+                "qog'oz/chop etish navbati YOZMANG.\n"
+                "- Aniq muammo yo'q bo'lsa — 1 ta aniqlashtirish so'rang.\n\n"
+                f"Xodim xabari:\n{user_block}\n\n"
+                f"Tegishli bilim bazasi (faqat shu muammoga mos bo'lsa):\n{kb}\n\n"
+                "Hozir oddiy tilda yechim bering."
             ),
         }
     )
@@ -270,19 +304,20 @@ async def generate_support_reply(
         if not text:
             text = (
                 "Muammo qabul qilindi, lekin AI bo'sh javob qaytardi. "
-                "Iltimos, qayta yozing yoki skrinshot yuboring."
+                "Iltimos, qayta yozing yoki ekran rasmini yuboring."
             )
         already_asked = any(
             x in text.lower()
-            for x in ("skrinshot", "скриншот", "screenshot", "расмни yubor", "пришлите скрин")
+            for x in ("skrinshot", "скриншот", "screenshot", "ekran rasm", "пришлите скрин", "расмни")
         )
-        return AIReply(
+        reply = AIReply(
             text=text,
             confidence=_detect_confidence(text) if articles else "LIKELY",
             model=result.model,
             used_kb=bool(articles),
             ask_screenshot=ask_shot and not already_asked,
         )
+        return _attach_guide(reply, user_text, lang, extra_context=vision_note)
     except GroqError as exc:
         logger.error("Groq failed: %s", exc)
         await _log_usage(
@@ -304,18 +339,17 @@ async def generate_support_reply(
             if lang == "ru":
                 text = (
                     f"Проблема: {a.problem or a.title}\n"
-                    f"Уверенность: VERIFIED\n"
                     f"{a.solution}\n{step_lines}\n\n"
                     "AI временно недоступен. Если не поможет — /operator"
                 )
             else:
                 text = (
                     f"Muammo: {a.problem or a.title}\n"
-                    f"Ishonch: VERIFIED\n"
                     f"{a.solution}\n{step_lines}\n\n"
                     "AI vaqtincha ishlamadi. Yechilmasa /operator"
                 )
-            return AIReply(text=text, confidence="VERIFIED", model="kb-fallback", used_kb=True)
+            reply = AIReply(text=text, confidence="VERIFIED", model="kb-fallback", used_kb=True)
+            return _attach_guide(reply, user_text, lang, extra_context=vision_note)
         return AIReply(
             text=(
                 "Сейчас AI недоступен. Напишите /operator"
@@ -336,7 +370,6 @@ async def transcribe_voice(
 ) -> str:
     try:
         stt = get_stt()
-        # Whisper auto-detect; hint uz/ru when known
         lang = language_hint if language_hint in {"uz", "ru"} else None
         result = await stt.transcribe(audio_bytes=audio_bytes, filename=filename, language=lang)
         await _log_usage(

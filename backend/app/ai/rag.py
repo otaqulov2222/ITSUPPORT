@@ -51,9 +51,12 @@ async def retrieve_articles(db: AsyncSession, query: str, limit: int = 3) -> lis
             or any("fom" in str(s).lower() for s in (article.related_software or []))
         ):
             score += 8
-        for soft in ("f-apteka", "printer", "chek", "internet", "kassa", "fiscal", "smena"):
+        for soft in ("f-apteka", "printer", "chek", "internet", "kassa", "fiscal", "smena", "fiskal", "mcr3500", "f-kassa"):
             if soft in qlow and soft in blob:
                 score += 2
+        if any(x in qlow for x in ("фискализ", "fiskallas", "fiskaliz", "фискального")):
+            if "fiscal" in blob or "fiskal" in blob or "mcr3500" in blob:
+                score += 12
         if score > 0:
             scored.append((score, article))
 

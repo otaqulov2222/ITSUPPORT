@@ -110,7 +110,18 @@ async def seed_knowledge_articles(db: AsyncSession) -> None:
         existing = await db.execute(
             select(KnowledgeArticle).where(KnowledgeArticle.title == item["title"])
         )
-        if existing.scalar_one_or_none():
+        row = existing.scalar_one_or_none()
+        if row:
+            # Oddiy til / yangilangan qadamlarni yangilab turish
+            row.category = item["category"]
+            row.problem = item["problem"]
+            row.symptoms = item["symptoms"]
+            row.root_cause = item["root_cause"]
+            row.solution = item["solution"]
+            row.steps = item["steps"]
+            row.related_software = item["related_software"]
+            row.status = "APPROVED"
+            row.version = int(row.version or 1) + 1
             continue
         db.add(
             KnowledgeArticle(
